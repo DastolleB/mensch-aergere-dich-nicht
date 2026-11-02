@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mensch ärgere dich nicht</title>
+<style>
+  :root {
+    --bg: #f3ead7; --ink: #2b2118; --field: #fffaf0; --line: #8a6d4b; --board: #e4d3b0;
+    --s: min(8.2vw, 46px);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1d1712; --ink: #f1e6d0; --field: #3a2f24; --line: #8a6d4b; --board: #2a2119; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--ink);
+         font-family: Georgia, "Times New Roman", serif; text-align: center; }
+  h1 { font-size: 1.6rem; margin: 4px 0 12px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; align-items: center; margin-bottom: 12px; }
+  button, select { font: inherit; padding: 8px 14px; border-radius: 8px; border: 2px solid var(--line);
+                   background: var(--field); color: var(--ink); cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  button:focus-visible, .piece:focus-visible { outline: 3px solid #e08a00; outline-offset: 2px; }
+  #dice { font-size: 2.4rem; line-height: 1; padding: 4px 14px; }
+  #status { min-height: 1.5em; margin: 8px 0 14px; font-size: 1.1rem; font-weight: bold; }
+  #board { display: inline-grid; grid-template-columns: repeat(11, var(--s)); grid-template-rows: repeat(11, var(--s));
+           gap: 3px; padding: 10px; background: var(--board); border: 3px solid var(--line); border-radius: 14px; }
+  .cell { border-radius: 50%; display: flex; align-items: center; justify-content: center; }
+  .track { background: var(--field); border: 2px solid var(--line); }
+  .goal { border: 2px solid var(--line); }
+  .home { border: 2px dashed var(--line); opacity: .8; }
+  .piece { width: 82%; height: 82%; border-radius: 50%; border: 3px solid rgba(0,0,0,.55); padding: 0;
+           box-shadow: inset 0 -4px 0 rgba(0,0,0,.25); cursor: default; }
+  .piece.can { cursor: pointer; animation: pulse .8s infinite alternate; border-color: #fff; }
+  @keyframes pulse { to { transform: scale(1.15); } }
+  @media (prefers-reduced-motion: reduce) { .piece.can { animation: none; outline: 3px solid #fff; } }
+</style>
+</head>
+<body>
+  <h1>Mensch ärgere dich nicht</h1>
+  <div class="bar">
+    <label>Spieler:
+      <select id="count"><option>2</option><option>3</option><option selected>4</option></select>
+    </label>
+    <button id="start">Neues Spiel</button>
+    <button id="dice" disabled aria-label="Würfeln">⚀</button>
+  </div>
+  <div id="status">Wähle die Spielerzahl und starte.</div>
+  <div id="board"></div>
+
+<script>
+// ---------- Spielfeld-Daten ----------
+const COLORS = ['#e63946', '#1d6fe0', '#2a9d4a', '#f2c230'];
+const NAMES  = ['Rot', 'Blau', 'Grün', 'Gelb'];
+const START  = [0, 10, 20, 30];            // Startfeld jedes Spielers auf der Laufbahn (40 Felder)
+const FACES  = ['⚀', '⚁', '⚂', '⚃', '⚄', '⚅'];
+
+// 40 Felder der Laufbahn als "x,y" im 11x11-Raster (im Uhrzeigersinn)
+const TRACK = ("0,4 1,4 2,4 3,4 4,4 4,3 4,2 4,1 4,0 5,0 6,0 6,1 6,2 6,3 6,4 7,4 8,4 9,4 10,4 10,5 " +
+               "10,6 9,6 8,6 7,6 6,6 6,7 6,8 6,9 6,10 5,10 4,10 4,9 4,8 4,7 4,6 3,6 2,6 1,6 0,6 0,5").split(' ');
+const GOAL = [
+  ['1,5', '2,5', '3,5', '4,5'], ['5,1', '5,2', '5,3', '5,4'],
+  ['9,5', '8,5', '7,5', '6,5'], ['5,9', '5,8', '5,7', '5,6']
+];
+const HOME = [
+  ['0,0', '1,0', '0,1', '1,1'],     ['9,0', '10,0', '9,1', '10,1'],
+  ['9,9', '10,9', '9,10', '10,10'], ['0,9', '1,9', '0,10', '1,10']
+];
+
+// ---------- Spielzustand ----------
+// Position eines Steins: -1 = im Haus, 0..39 = Schritte ab eigenem Start, 40..43 = Ziel
+let n, current, pieces, dice, tries, phase;  // phase: 'roll' | 'move' | 'over'
+
+const $ = id => document.getElementById(id);
+const boardEl = $('board'), statusEl = $('status'), diceEl = $('dice');
+const cells = {};
+
+function makeCell(key, cls, color) {
+  const [x, y] = key.split(',').map(Number);
+  const d = document.createElement('div');
+  d.className = 'cell ' + cls;
+  d.style.gridColumn = x + 1;
+  d.style.gridRow = y + 1;
+  if (color) d.style.background = color;
+  boardEl.appendChild(d);
+  cells[key] = d;
+}
+
+function buildBoard() {
+  boardEl.innerHTML = '';
+  TRACK.forEach(k => makeCell(k, 'track'));
+  for (let p = 0; p < 4; p++) {
+    makeCell(TRACK[START[p]], 'track', COLORS[p] + '99');  // Startfeld einfärben
+    GOAL[p].forEach(k => makeCell(k, 'goal', COLORS[p] + '55'));
+    HOME[p].forEach(k => makeCell(k, 'home', COLORS[p] + '44'));
+  }
+}
+// Startfelder wurden doppelt angelegt: das später erzeugte (farbige) überdeckt das erste
+function cellOf(p, r, i) {
+  if (r === -1) return HOME[p][i];
+  if (r < 40)   return TRACK[(START[p] + r) % 40];
+  return GOAL[p][r - 40];
+}
+
+// ---------- Regeln ----------
+const ownAt = (p, r) => pieces[p].includes(r);
+
+function canMove(p, i, d) {
+  const r = pieces[p][i];
+  if (r === -1) return d === 6 && !ownAt(p, 0);
+  const nr = r + d;
+  return nr <= 43 && !ownAt(p, nr);
+}
+
+function movable(p, d) {
+  const list = [0, 1, 2, 3].filter(i => canMove(p, i, d));
+  // Startfeld muss zuerst geräumt werden, wenn noch Steine im Haus sind
+  const onStart = pieces[p].indexOf(0);
+  if (onStart !== -1 && pieces[p].includes(-1) && list.includes(onStart)) return [onStart];
+  return list;
+}
+
+const allAtHome = p => pieces[p].every(r => r === -1 || r >= 40);
+
+// ---------- Ablauf ----------
+function startGame() {
+  n = +$('count').value;
+  pieces = Array.from({ length: 4 }, () => [-1, -1, -1, -1]);
+  current = 0; dice = 0; phase = 'roll'; tries = 3;
+  buildBoard();
+  render();
+  say(`${NAMES[0]} ist dran – würfle!`);
+  diceEl.disabled = false;
+}
+
+function say(text) { statusEl.textContent = text; statusEl.style.color = ''; }
+
+function render() {
+  document.querySelectorAll('.piece').forEach(e => e.remove());
+  const can = phase === 'move' ? movable(current, dice) : [];
+  for (let p = 0; p < n; p++) {
+    for (let i = 0; i < 4; i++) {
+      const b = document.createElement('button');
+      b.className = 'piece' + (p === current && can.includes(i) ? ' can' : '');
+      b.style.background = COLORS[p];
+      b.setAttribute('aria-label', `${NAMES[p]} Stein ${i + 1}`);
+      if (p === current && can.includes(i)) b.onclick = () => move(i);
+      else b.tabIndex = -1;
+      cells[cellOf(p, pieces[p][i], i)].appendChild(b);
+    }
+  }
+  diceEl.textContent = dice ? FACES[dice - 1] : '⚀';
+  diceEl.disabled = phase !== 'roll';
+  statusEl.style.color = COLORS[current];
+}
+
+function roll() {
+  if (phase !== 'roll') return;
+  dice = 1 + Math.floor(Math.random() * 6);
+  const moves = movable(current, dice);
+  if (moves.length) {
+    phase = 'move';
+    render();
+    say(`${NAMES[current]} würfelt ${dice} – wähle einen Stein.`);
+    statusEl.style.color = COLORS[current];
+  } else if (allAtHome(current) && tries > 1) {
+    tries--;
+    render();
+    say(`${NAMES[current]} würfelt ${dice}. Noch ${tries} Versuch(e).`);
+    statusEl.style.color = COLORS[current];
+  } else {
+    render();
+    say(`${NAMES[current]} würfelt ${dice} – kein Zug möglich.`);
+    phase = 'wait';
+    setTimeout(nextPlayer, 1100);
+  }
+}
+
+function move(i) {
+  const p = current, r = pieces[p][i];
+  const nr = r === -1 ? 0 : r + dice;
+  pieces[p][i] = nr;
+
+  // Gegner rauswerfen
+  if (nr < 40) {
+    const abs = (START[p] + nr) % 40;
+    for (let q = 0; q < n; q++) {
+      if (q === p) continue;
+      pieces[q] = pieces[q].map(rq => (rq >= 0 && rq < 40 && (START[q] + rq) % 40 === abs) ? -1 : rq);
+    }
+  }
+
+  if (pieces[p].every(r => r >= 40)) {
+    phase = 'over'; render();
+    say(`🎉 ${NAMES[p]} hat gewonnen!`);
+    statusEl.style.color = COLORS[p];
+    return;
+  }
+  if (dice === 6) {                      // bei einer 6 nochmal würfeln
+    phase = 'roll'; tries = 1; render();
+    say(`${NAMES[p]} hat eine 6 – nochmal würfeln!`);
+    statusEl.style.color = COLORS[p];
+  } else {
+    nextPlayer();
+  }
+}
+
+function nextPlayer() {
+  current = (current + 1) % n;
+  phase = 'roll';
+  tries = allAtHome(current) ? 3 : 1;
+  dice = 0;
+  render();
+  say(`${NAMES[current]} ist dran – würfle!`);
+  statusEl.style.color = COLORS[current];
+}
+
+$('start').onclick = startGame;
+diceEl.onclick = roll;
+buildBoard();
+</script>
+</body>
+</html>
